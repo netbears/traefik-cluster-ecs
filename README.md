@@ -124,7 +124,7 @@ http://${application}-${build_tag}.${environment}.${domain}
 ```
 
 * Login to the AWS console and browse to the CloudFormation section
-* Select the "cloudformation-template-service.yaml” file
+* Select the `cloudformation-template-service.yaml` file
 * Before clicking "Create", make sure that you scroll down and tick the “I acknowledge that AWS CloudFormation might create IAM resources” checkbox
 * ...drink coffee...
 * Go to the URL in the output section for the environment that you want to access
@@ -153,7 +153,7 @@ All you have to do is browse to that URL. If everything went fine, then you'll s
 
 For instance, for this specific tutorial, I've purposely included a custom script that displays all cookies and headers of your request when accessing it via Traefik:
 
-![Traefik Containers](https://netbears.com//assets/img/articles/traefik-cluster-ecs/traefik-result.png "Traefik Containers") 
+![Traefik Containers](https://netbears.com/assets/img/articles/traefik-cluster-ecs/traefik-result.png "Traefik Containers") 
 
 ## Final notes
 Need help implementing this?

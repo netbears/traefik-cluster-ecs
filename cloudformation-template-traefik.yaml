@@ -1,0 +1,379 @@
+Parameters:
+
+  ClusterHostMonitor:
+    Type: String
+    Description: The cluster which is being monitored
+
+  Domain:
+    Type: String
+    Description: Domain in which tasks should be registered to - MUST already exist as a zone in Route53
+    Default: example.com
+
+  EcsCluster:
+    Type: String
+    Description: CloudFormation stack name
+
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Default: dev
+
+  TraefikImage:
+    Type: String
+    Description: The Repository URI for the Traefik docker image
+
+  LoadBalancerScheme:
+    Type: String
+    AllowedValues:
+      - internal
+      - internet-facing
+    Default: internal
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The subnets in which the load balancer will run
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC in which the laod balancer will run
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName:
+        Fn::Sub: ${AWS::StackName}-LogGroup
+      RetentionInDays: 14
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-Ecs
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - "ecs:*"
+            - "ec2:DescribeInstances"
+            Resource:
+            - "*"
+
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: traefik
+          Image: !Ref TraefikImage
+          Environment:
+            - Name: STACK_NAME
+              Value: !Ref AWS::StackName
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: CLUSTER_HOST
+              Value: !Ref ClusterHostMonitor
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: DOMAIN
+              Value: !Ref Domain
+          PortMappings:
+            - ContainerPort: 80
+            - ContainerPort: 8080
+          Memory: 512
+          MemoryReservation: 256
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix:
+                Ref: AWS::StackName
+          Ulimits:
+            - HardLimit: 65536
+              SoftLimit: 10240
+              Name: nofile
+      TaskRoleArn: !GetAtt TaskRole.Arn
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['elasticloadbalancing:DeregisterInstancesFromLoadBalancer', 'elasticloadbalancing:DeregisterTargets',
+              'elasticloadbalancing:Describe*', 'elasticloadbalancing:RegisterInstancesWithLoadBalancer',
+              'elasticloadbalancing:RegisterTargets', 'ec2:Describe*', 'ec2:AuthorizeSecurityGroupIngress']
+            Resource: '*'
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListenerHttp
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDef
+      DesiredCount: 2
+      Role: !Ref 'ECSServiceRole'
+      LoadBalancers:
+      - ContainerName: traefik
+        ContainerPort: '80'
+        TargetGroupArn: !Ref 'ECSTG'
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      PlacementStrategies:
+        - Field: attribute:ecs.availability-zone
+          Type: spread
+        - Field: instanceId
+          Type: spread
+
+  ApplicationScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-Ecs
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - "application-autoscaling:*"
+            - "cloudwatch:DescribeAlarms"
+            - "cloudwatch:PutMetricAlarm"
+            - "ecs:*"
+            Resource:
+            - "*"
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 2
+      MaxCapacity: 10
+      ResourceId: !Join
+        - /
+        - - service
+          - !Ref EcsCluster
+          - !GetAtt Service.Name
+      RoleARN: !GetAtt ApplicationScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScaleOut:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleOut
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 600
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 1
+
+  ScaleIn:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleIn
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 600
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: -1
+
+  CPUHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref ScaleOut
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 300
+      Statistic: Average
+      Threshold: 70
+
+  CPULow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref ScaleIn
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 300
+      Statistic: Average
+      Threshold: 30
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Allowed Ports
+      VpcId: !Ref VpcId
+
+  EcsSecurityGroupHttpInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupHttpAltInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '8080'
+      ToPort: '8080'
+      CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupHttpsInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '443'
+      ToPort: '443'
+      CidrIp: 0.0.0.0/0
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-traefik"
+      Scheme: !Ref LoadBalancerScheme
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets: !Ref Subnets
+      SecurityGroups: [ !Ref EcsSecurityGroup ]
+
+  ALBListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSTG'
+      LoadBalancerArn: !Ref 'Alb'
+      Port: '80'
+      Protocol: HTTP
+
+  ALBListenerHttpStatus:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSTG'
+      LoadBalancerArn: !Ref 'Alb'
+      Port: '8080'
+      Protocol: HTTP
+
+  ALBListenerRuleHttp:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSTG'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'ALBListenerHttp'
+      Priority: 1
+
+  ALBListenerRuleHttpStatus:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSTG'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'ALBListenerHttpStatus'
+      Priority: 2
+
+  ECSTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: Alb
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: '404'
+      Name: !Sub "${AWS::StackName}-traefik"
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub "${Domain}."
+      Comment: !Sub Route53-record-for-${AWS::StackName}-traefik.
+      RecordSets:
+      - Name: !Sub "traefik.${Environment}.${Domain}."
+        Type: A
+        AliasTarget:
+          HostedZoneId: !GetAtt Alb.CanonicalHostedZoneID
+          DNSName: !GetAtt Alb.DNSName
+
+Outputs:
+
+  TraefikAlbDualstackName:
+    Export:
+      Name: !Sub ${AWS::StackName}-TraefikAlbDualstackName
+    Value: !GetAtt Alb.DNSName
+
+  TraefikAlbHostedZone:
+    Export:
+      Name: !Sub ${AWS::StackName}-TraefikAlbHostedZone
+    Value: !GetAtt Alb.CanonicalHostedZoneID

@@ -1,0 +1,15 @@
+[web]
+address = ":8080"
+readOnly = true
+[web.metrics.prometheus]
+buckets=[0.1,0.3,1.2,5.0]
+
+
+[ecs]
+clusters = ["CLUSTER_HOST"]
+watch = true
+domain = "ENVIRONMENT.DOMAIN"
+autoDiscoverClusters = false
+refreshSeconds = 15
+exposedByDefault = true
+region = "AWS_REGION"

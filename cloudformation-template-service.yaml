@@ -1,0 +1,111 @@
+Parameters:
+
+  ServiceImage:
+    Type: String
+    Description: The repository URI of the application image
+    Default: mmitrofan/whoami:latest
+
+  ApplicationName:
+    Type: String
+    Description: The application Name
+    Default: whoami
+
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Default: dev
+
+  EcsCluster:
+    Type: String
+    Default: services-cluster
+    Description: The cluster in which to deploy this service
+
+  Domain:
+    Type: String
+    Description: Domain in which tasks should be registered to - MUST already exist as a zone in Route53
+    Default: example.com
+
+  TraefikStack:
+    Type: String
+    Description: The name of the CloudFormation stack which contains the traefik service
+    Default: traefik-srv
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName:
+        Fn::Sub: ${AWS::StackName}-LogGroup
+      RetentionInDays: 14
+
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: !Ref ApplicationName
+          Image: !Ref ServiceImage
+          PortMappings:
+            - ContainerPort: 80
+          Memory: 512
+          MemoryReservation: 256
+          DockerLabels:
+            traefik.frontend.rule: !Join
+              - .
+              - - !Join [ "-", [ !Sub "Host: ${ApplicationName}", !Select ["1", !Split [":", !Ref ServiceImage]] ] ]
+                - !Ref Environment
+                - !Ref Domain
+            traefik.enable: "true"
+            traefik.protocol: "http"
+            traefik.backend.loadbalancer.method: "wrr"
+            traefik.backend.loadbalancer.stickiness: "true"
+            traefik.backend.loadbalancer.stickiness.cookieName: !Join
+              - .
+              - - cookie
+                - !Join [ "-", [ !Sub "${ApplicationName}", !Select ["1", !Split [":", !Ref ServiceImage]] ] ]
+                - !Ref Environment
+                - !Ref Domain
+            traefik.backend.loadbalancer.stickiness.cookieName: "true"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix:
+                Ref: AWS::StackName
+          Ulimits:
+            - HardLimit: 65536
+              SoftLimit: 10240
+              Name: nofile
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDef
+      DesiredCount: 1
+      PlacementStrategies:
+        - Field: attribute:ecs.availability-zone
+          Type: spread
+        - Field: instanceId
+          Type: spread
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Join
+        - .
+        - - !Join [ "-", [ !Sub "${ApplicationName}", !Select ["1", !Split [":", !Ref ServiceImage]] ] ]
+          - !Ref Environment
+          - !Ref Domain
+      HostedZoneName: !Sub "${Domain}."
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue: !Sub ${TraefikStack}-TraefikAlbDualstackName
+        HostedZoneId:
+          Fn::ImportValue: !Sub ${TraefikStack}-TraefikAlbHostedZone

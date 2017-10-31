@@ -2,7 +2,7 @@
 
 This is a tutorial on how to deploy a Traefik Load Balancer in AWS to create hosts (FQDN) for development applications launched in ECS based on application name and tags.
 
-The CloudFormation template and explanation is also posted on the [NETBEARS](https://github.com/NETBEARS/traefik-cluster-ecs/) company blog. You might want to check the website out for more tutorials like this.
+The CloudFormation template and explanation is also posted on the [NETBEARS](https://netbears.com/blog/traefik-cluster-ecs/) company blog. You might want to check the website out for more tutorials like this.
 
 ## What is Traefik?
 
